@@ -1,0 +1,39 @@
+{
+    "name": "muni/casbin-authz",
+    "description": "Embedded Casbin authorization data plane for Laravel: local policy snapshot refreshed from the casbin_rule table, stale-forever on DB failure, fail-closed without snapshot.",
+    "type": "library",
+    "license": "proprietary",
+    "require": {
+        "php": "^8.2",
+        "casbin/casbin": "^4",
+        "illuminate/support": "^11|^12",
+        "illuminate/database": "^11|^12",
+        "illuminate/cache": "^11|^12",
+        "illuminate/console": "^11|^12"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9|^10",
+        "phpunit/phpunit": "^11"
+    },
+    "autoload": {
+        "psr-4": {
+            "Muni\\CasbinAuthz\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Muni\\CasbinAuthz\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Muni\\CasbinAuthz\\CasbinAuthzServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "stable",
+    "config": {
+        "sort-packages": true
+    }
+}
