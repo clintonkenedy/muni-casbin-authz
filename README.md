@@ -130,3 +130,26 @@ php artisan casbin-authz:refresh
 - `AuthzEnforcer::policyAge()` / `PolicyStore::policyAge()` return the snapshot
   age in seconds (or `null`) for health endpoints and alerting
   (alert when `casbin_policy_age_seconds > 600`).
+
+## Health endpoint (recommended)
+
+The snapshot refreshes **lazily**, only when a request is authorized. On an idle
+system (nights, weekends) its age keeps growing and a `policy age > N` alert would
+fire even though everything is healthy. Call `refreshIfStale()` from your health
+endpoint so monitoring polls keep the snapshot fresh and the metric honest:
+
+```php
+public function __invoke(PolicyStore $store): JsonResponse
+{
+    try {
+        $store->refreshIfStale();
+    } catch (PolicyUnavailableException) {
+        // no snapshot and DB down → age is null
+    }
+
+    return response()->json([
+        'status' => 'ok',
+        'casbin_policy_age_seconds' => $store->policyAge(),
+    ]);
+}
+```
