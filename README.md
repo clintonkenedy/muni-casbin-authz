@@ -5,7 +5,7 @@ Embedded Casbin **authorization data plane** for Laravel backends.
 Each backend enforces authorization locally from a policy snapshot read from the
 shared `casbin_rule` table. The **control plane** (policy administration, the
 `/check` HTTP service, writes to `casbin_rule`) remains the Go service
-[`casbian-muni-puno`](https://github.com/MuniPuno/casbian-muni-puno); this
+[`casbian-muni-puno`](https://github.com/clintonkenedy/casbian-muni-puno); this
 package only *reads* policies and evaluates them in-process, so authorization
 keeps working even when the Casbin service or its database is down.
 
@@ -37,7 +37,7 @@ Add the repository to the consuming app's `composer.json`:
         { "type": "path", "url": "../../muni-casbin-authz" }
     ],
     "_comment_repositories": [
-        { "type": "vcs", "url": "git@github.com:MuniPuno/muni-casbin-authz.git" }
+        { "type": "vcs", "url": "https://github.com/clintonkenedy/muni-casbin-authz.git" }
     ]
 }
 ```
