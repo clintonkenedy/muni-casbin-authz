@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 — unreleased (no git tag)
+## 0.2.0 — 2026-11-02
 
 - New `http` policy source (`CASBIN_SOURCE=http`): pulls the policy snapshot
   from the control plane `GET /policies/snapshot` over HTTPS using a Hydra
@@ -11,6 +11,7 @@
     fresh token on `401`.
   - Conditional refresh via `If-None-Match`/`304`; the snapshot file now
     stores the `version` alongside `loaded_at` and `rules`.
+  - Requests a gzip-compressed snapshot (`Accept-Encoding: gzip`).
   - Failure semantics identical to the database source: stale-forever on any
     failure, `PolicyUnavailableException` without a snapshot.
 - `casbin-authz:refresh` now refreshes from the configured source.
