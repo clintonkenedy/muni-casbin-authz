@@ -41,6 +41,7 @@ class CasbinAuthzServiceProvider extends ServiceProvider
                 dbTimeoutSeconds: (int) $config['db_timeout_seconds'],
                 source: $source,
                 httpSource: $httpSource,
+                failureBackoffMaxSeconds: (int) ($config['failure_backoff_max_seconds'] ?? 300),
             );
         });
 

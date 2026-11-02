@@ -34,4 +34,19 @@ class RefreshPolicyCommandTest extends TestCase
 
         $this->artisan('casbin-authz:refresh')->assertExitCode(1);
     }
+
+    public function test_refresh_command_prints_status(): void
+    {
+        $this->seedDefaultPolicy();
+
+        // One substring only: Laravel's output mock lets a single written line
+        // satisfy at most one expectsOutputToContain expectation.
+        $this->artisan('casbin-authz:refresh')
+            ->expectsOutputToContain('"source":"database","version":null')
+            ->assertExitCode(0);
+
+        $status = $this->app->make(\Muni\CasbinAuthz\PolicyStore::class)->status();
+        $this->assertSame(0, $status['consecutive_failures']);
+        $this->assertSame(0, $status['age_seconds']);
+    }
 }

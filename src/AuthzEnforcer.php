@@ -50,6 +50,16 @@ class AuthzEnforcer
         return $this->store->policyAge();
     }
 
+    /**
+     * Health snapshot for monitoring endpoints (see PolicyStore::status()).
+     *
+     * @return array{source: string, version: string|null, loaded_at: int|null, age_seconds: int|null, last_error_at: int|null, consecutive_failures: int, next_attempt_at: int|null}
+     */
+    public function status(): array
+    {
+        return $this->store->status();
+    }
+
     private function enforcer(): Enforcer
     {
         $snapshot = $this->store->snapshot();

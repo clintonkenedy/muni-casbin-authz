@@ -20,12 +20,19 @@ class RefreshPolicyCommand extends Command
             $count = $store->refreshNow();
         } catch (Throwable $e) {
             $this->error('Casbin policy refresh failed: '.$e->getMessage());
+            $this->printStatus($store);
 
             return self::FAILURE;
         }
 
         $this->info(sprintf('Casbin policy snapshot refreshed: %d rules.', $count));
+        $this->printStatus($store);
 
         return self::SUCCESS;
+    }
+
+    private function printStatus(PolicyStore $store): void
+    {
+        $this->line(json_encode($store->status(), JSON_UNESCAPED_SLASHES) ?: '{}');
     }
 }

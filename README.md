@@ -11,10 +11,14 @@ keeps working even when the Casbin service or its database is down.
 
 Two policy **sources** are supported (config `source`, env `CASBIN_SOURCE`):
 
-- `database` (default) — read the shared `casbin_rule` table directly.
-- `http` — pull the policy snapshot from the control plane over HTTPS
-  (`GET /policies/snapshot`), for systems deployed elsewhere that cannot
-  reach the Casbin Postgres.
+- `http` (**recommended for every system**) — pull the policy snapshot from
+  the control plane over HTTPS (`GET /policies/snapshot`). No system other
+  than the Casbin service itself needs database credentials for the policy
+  store.
+- `database` (default, kept only for backward compatibility) — read the
+  shared `casbin_rule` table directly.
+
+Set `CASBIN_SOURCE=http` in new deployments.
 
 ## How it works
 
@@ -29,10 +33,27 @@ watcher, the package keeps a local JSON snapshot
    stampede). On success the snapshot is rewritten atomically.
 3. If the DB is unreachable, the **existing snapshot keeps being used
    indefinitely** (permission changes are frozen until recovery) and a warning
-   is logged at most once per minute.
+   is logged at most once per minute. The failure also starts a **retry
+   backoff** (see below) so requests inside the window skip the source
+   entirely instead of each paying the timeout.
 4. If the DB is unreachable **and no snapshot exists**, the package fails
    closed: `PolicyUnavailableException` is thrown — map it to
-   `503 {"error":"authz_unavailable"}`.
+   `503 {"error":"authz_unavailable"}`. Inside the backoff window the
+   exception is thrown immediately, without a new source attempt.
+
+The same flow applies to the `http` source, with the snapshot endpoint in
+place of the DB read.
+
+### Failure backoff
+
+After a failed refresh the next attempt is delayed: 5 s after the first
+failure, doubling per consecutive failure (5 → 10 → 20 → …) up to
+`failure_backoff_max_seconds` (env `CASBIN_FAILURE_BACKOFF_MAX_SECONDS`,
+default 300). During the window every request serves the stale snapshot with
+**no network/DB call at all**. Any successful refresh (200 or 304) resets the
+backoff. The backoff state is kept in the cache store (the same store used for
+the refresh lock), not in the snapshot file, so it works even before any
+snapshot exists and failures never rewrite the snapshot file.
 
 ## Installation
 
@@ -73,6 +94,7 @@ database.
 | `snapshot_path`      | —                       | `storage/app/casbin/policy.json`      | Local policy snapshot                              |
 | `refresh_seconds`    | `CASBIN_REFRESH_SECONDS`| `30`                                  | Snapshot max age before a reload is attempted      |
 | `db_timeout_seconds` | —                       | `2`                                   | Statement timeout for the policy read (pgsql)      |
+| `failure_backoff_max_seconds` | `CASBIN_FAILURE_BACKOFF_MAX_SECONDS` | `300`        | Cap for the doubling retry backoff after failures  |
 | `source`             | `CASBIN_SOURCE`         | `database`                            | Policy source: `database` or `http`                |
 | `http.snapshot_url`  | `CASBIN_SNAPSHOT_URL`   | —                                     | Full URL of the control plane `/policies/snapshot` |
 | `http.token_url`     | `CASBIN_TOKEN_URL`      | —                                     | Hydra `/oauth2/token` endpoint                     |
@@ -99,8 +121,9 @@ refreshes the local snapshot from the control plane endpoint
   a successful refresh).
 - Resilience is identical to the database source: any failure (network,
   timeout, 5xx, malformed body, token error) keeps the last snapshot
-  **indefinitely** and logs a throttled warning; with no snapshot at all,
-  `PolicyUnavailableException` is thrown (map to `503`).
+  **indefinitely**, starts the retry backoff, and logs a throttled warning;
+  with no snapshot at all, `PolicyUnavailableException` is thrown (map to
+  `503`).
 - The rules feed the exact same enforcer path as the database source, so
   authorization decisions are identical for the same policy.
 
@@ -163,7 +186,9 @@ memoized per request.
 - Policy snapshot refreshed from the configured source at most every
   `refresh_seconds`.
 - On source failure (DB or HTTP) the stale snapshot is kept **indefinitely**
-  (fail-stale); a warning is logged at most once per 60 s.
+  (fail-stale); a warning is logged at most once per 60 s and a doubling retry
+  backoff (5 s → `failure_backoff_max_seconds`) prevents every request from
+  paying the source timeout while it is down.
 - Without any snapshot, enforcement **fails closed** with
   `PolicyUnavailableException` → respond `503`.
 - `casbin-authz:refresh` forces an immediate reload from the configured source
@@ -177,6 +202,22 @@ php artisan casbin-authz:refresh
 - `AuthzEnforcer::policyAge()` / `PolicyStore::policyAge()` return the snapshot
   age in seconds (or `null`) for health endpoints and alerting
   (alert when `casbin_policy_age_seconds > 600`).
+- `AuthzEnforcer::status()` / `PolicyStore::status()` return a health map for
+  monitoring endpoints — fields are `null` when not applicable:
+
+```json
+{
+    "source": "http",
+    "version": "<sha256>",
+    "loaded_at": 1767312000,
+    "age_seconds": 12,
+    "last_error_at": null,
+    "consecutive_failures": 0,
+    "next_attempt_at": null
+}
+```
+
+  `casbin-authz:refresh` prints the same JSON after each run.
 
 ## Health endpoint (recommended)
 
@@ -196,7 +237,7 @@ public function __invoke(PolicyStore $store): JsonResponse
 
     return response()->json([
         'status' => 'ok',
-        'casbin_policy_age_seconds' => $store->policyAge(),
+        'casbin' => $store->status(),
     ]);
 }
 ```

@@ -19,6 +19,11 @@ abstract class TestCase extends Orchestra
     {
         parent::setUp();
 
+        $this->recreatePolicyTable();
+    }
+
+    protected function recreatePolicyTable(): void
+    {
         Schema::connection('casbin')->create('casbin_rule', function (Blueprint $table): void {
             $table->increments('id');
             $table->string('p_type')->nullable();

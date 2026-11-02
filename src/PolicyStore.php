@@ -23,6 +23,10 @@ class PolicyStore
 
     private const WARNING_THROTTLE_KEY = 'casbin-authz:refresh-warning';
 
+    private const BACKOFF_KEY = 'casbin-authz:backoff';
+
+    private const BACKOFF_BASE_SECONDS = 5;
+
     private const LOCK_SECONDS = 5;
 
     private const WARNING_THROTTLE_SECONDS = 60;
@@ -35,6 +39,7 @@ class PolicyStore
         private readonly int $dbTimeoutSeconds,
         private readonly string $source = 'database',
         private readonly ?HttpPolicySource $httpSource = null,
+        private readonly int $failureBackoffMaxSeconds = 300,
     ) {
     }
 
@@ -160,6 +165,20 @@ class PolicyStore
             }
         }
 
+        $backoff = $this->backoffState();
+
+        if ($backoff !== null && Carbon::now()->getTimestamp() < $backoff['next_attempt_at']) {
+            if ($snapshot === null) {
+                throw new PolicyUnavailableException(sprintf(
+                    'Casbin policy unavailable: no local snapshot and the %s source is in its failure backoff window.',
+                    $this->source,
+                ));
+            }
+
+            // Inside the backoff window: serve the stale snapshot, no source call.
+            return;
+        }
+
         $lock = Cache::lock(self::LOCK_KEY, self::LOCK_SECONDS);
         $acquired = $lock->get();
 
@@ -170,7 +189,9 @@ class PolicyStore
 
         try {
             $this->refreshFromSource($snapshot);
+            $this->resetBackoff();
         } catch (Throwable $e) {
+            $this->recordFailure();
             $this->warnThrottled($e);
 
             if ($snapshot === null) {
@@ -193,11 +214,41 @@ class PolicyStore
      */
     public function refreshNow(): int
     {
-        $this->refreshFromSource($this->snapshot());
+        try {
+            $this->refreshFromSource($this->snapshot());
+        } catch (Throwable $e) {
+            $this->recordFailure();
+
+            throw $e;
+        }
+
+        $this->resetBackoff();
 
         $fresh = $this->snapshot();
 
         return $fresh === null ? 0 : count($fresh['rules']);
+    }
+
+    /**
+     * Health snapshot for monitoring endpoints. Fields are null when not
+     * applicable (e.g. no snapshot yet, no recorded failure).
+     *
+     * @return array{source: string, version: string|null, loaded_at: int|null, age_seconds: int|null, last_error_at: int|null, consecutive_failures: int, next_attempt_at: int|null}
+     */
+    public function status(): array
+    {
+        $snapshot = $this->snapshot();
+        $backoff = $this->backoffState();
+
+        return [
+            'source' => $this->source,
+            'version' => $snapshot['version'] ?? null,
+            'loaded_at' => $snapshot['loaded_at'] ?? null,
+            'age_seconds' => $snapshot === null ? null : max(0, Carbon::now()->getTimestamp() - $snapshot['loaded_at']),
+            'last_error_at' => $backoff['last_error_at'] ?? null,
+            'consecutive_failures' => $backoff['consecutive_failures'] ?? 0,
+            'next_attempt_at' => $backoff['next_attempt_at'] ?? null,
+        ];
     }
 
     /**
@@ -241,6 +292,56 @@ class PolicyStore
         }
 
         return max(0, Carbon::now()->getTimestamp() - $snapshot['loaded_at']);
+    }
+
+    /**
+     * Current failure backoff state, or null when the last refresh succeeded.
+     *
+     * @return array{consecutive_failures: int, last_error_at: int, next_attempt_at: int}|null
+     */
+    private function backoffState(): ?array
+    {
+        $state = Cache::get(self::BACKOFF_KEY);
+
+        if (! is_array($state) || ! isset($state['consecutive_failures'], $state['last_error_at'], $state['next_attempt_at'])) {
+            return null;
+        }
+
+        return [
+            'consecutive_failures' => (int) $state['consecutive_failures'],
+            'last_error_at' => (int) $state['last_error_at'],
+            'next_attempt_at' => (int) $state['next_attempt_at'],
+        ];
+    }
+
+    /**
+     * Record a failed refresh: the retry delay doubles from 5 s per
+     * consecutive failure, capped at failure_backoff_max_seconds.
+     */
+    private function recordFailure(): void
+    {
+        $failures = ($this->backoffState()['consecutive_failures'] ?? 0) + 1;
+
+        $delay = self::BACKOFF_BASE_SECONDS;
+
+        for ($i = 1; $i < $failures && $delay < $this->failureBackoffMaxSeconds; $i++) {
+            $delay *= 2;
+        }
+
+        $delay = min($delay, max(self::BACKOFF_BASE_SECONDS, $this->failureBackoffMaxSeconds));
+
+        $now = Carbon::now()->getTimestamp();
+
+        Cache::put(self::BACKOFF_KEY, [
+            'consecutive_failures' => $failures,
+            'last_error_at' => $now,
+            'next_attempt_at' => $now + $delay,
+        ], max($this->failureBackoffMaxSeconds * 2, 600));
+    }
+
+    private function resetBackoff(): void
+    {
+        Cache::forget(self::BACKOFF_KEY);
     }
 
     private function warnThrottled(Throwable $e): void

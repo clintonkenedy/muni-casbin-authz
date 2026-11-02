@@ -24,6 +24,11 @@ return [
     // Statement timeout applied to the policy read (pgsql).
     'db_timeout_seconds' => 2,
 
+    // After a failed refresh the next attempt is delayed, doubling from 5 s
+    // per consecutive failure up to this cap. During the backoff window the
+    // stale snapshot is served with no source call at all.
+    'failure_backoff_max_seconds' => (int) env('CASBIN_FAILURE_BACKOFF_MAX_SECONDS', 300),
+
     // Settings for the 'http' source (ignored for 'database').
     'http' => [
         // Full URL of the control plane snapshot endpoint, e.g.
