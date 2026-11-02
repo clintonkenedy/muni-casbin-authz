@@ -245,4 +245,22 @@ class HttpSourceTest extends TestCase
 
         $this->assertSame(1, $tokenRequests);
     }
+
+    public function test_requests_gzip_compression(): void
+    {
+        // Http::fake bypasses Guzzle's decoder; real gzip decoding is covered by
+        // the live check against the Go service (decode_content => 'gzip').
+        Http::fake([
+            self::TOKEN_URL => $this->tokenResponse('tok-1'),
+            self::SNAPSHOT_URL => $this->snapshotResponse(self::VERSION_1, $this->defaultRules()),
+        ]);
+
+        $enforcer = $this->app->make(AuthzEnforcer::class);
+        $this->assertTrue($enforcer->allows('12345678', 'sistrans', '/api/tuc/123', 'GET'));
+
+        Http::assertSent(function (Request $request): bool {
+            return $request->url() === self::SNAPSHOT_URL
+                && str_contains($request->header('Accept-Encoding')[0] ?? '', 'gzip');
+        });
+    }
 }

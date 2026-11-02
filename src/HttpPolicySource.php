@@ -67,6 +67,8 @@ class HttpPolicySource
     {
         $request = Http::timeout($this->timeoutSeconds)
             ->withToken($token)
+            // Ask for gzip; Guzzle's curl handler decodes it (decode_content defaults to true).
+            ->withHeaders(['Accept-Encoding' => 'gzip'])
             ->acceptJson();
 
         if ($currentVersion !== null) {
