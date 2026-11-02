@@ -12,20 +12,19 @@ class RefreshPolicyCommand extends Command
 {
     protected $signature = 'casbin-authz:refresh';
 
-    protected $description = 'Force a reload of the Casbin policy snapshot from the database.';
+    protected $description = 'Force a reload of the Casbin policy snapshot from the configured source.';
 
     public function handle(PolicyStore $store): int
     {
         try {
-            $rules = $store->load();
-            $store->writeSnapshot($rules);
+            $count = $store->refreshNow();
         } catch (Throwable $e) {
             $this->error('Casbin policy refresh failed: '.$e->getMessage());
 
             return self::FAILURE;
         }
 
-        $this->info(sprintf('Casbin policy snapshot refreshed: %d rules.', count($rules)));
+        $this->info(sprintf('Casbin policy snapshot refreshed: %d rules.', $count));
 
         return self::SUCCESS;
     }

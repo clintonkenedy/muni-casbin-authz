@@ -13,8 +13,9 @@ use RuntimeException;
 use Throwable;
 
 /**
- * Reads casbin_rule from the database and maintains a local JSON snapshot
- * ({loaded_at, rules}) that survives database outages indefinitely.
+ * Maintains a local JSON snapshot ({loaded_at, version?, rules}) of the
+ * Casbin policy, refreshed from the configured source (database or http),
+ * surviving source outages indefinitely.
  */
 class PolicyStore
 {
@@ -32,6 +33,8 @@ class PolicyStore
         private readonly string $snapshotPath,
         private readonly int $refreshSeconds,
         private readonly int $dbTimeoutSeconds,
+        private readonly string $source = 'database',
+        private readonly ?HttpPolicySource $httpSource = null,
     ) {
     }
 
@@ -74,7 +77,7 @@ class PolicyStore
     /**
      * Read the current snapshot, or null when missing/unreadable.
      *
-     * @return array{loaded_at: int, rules: array<int, array<int, string>>}|null
+     * @return array{loaded_at: int, version: string|null, rules: array<int, array<int, string>>}|null
      */
     public function snapshot(): ?array
     {
@@ -94,8 +97,11 @@ class PolicyStore
             return null;
         }
 
+        $version = $decoded['version'] ?? null;
+
         return [
             'loaded_at' => (int) $decoded['loaded_at'],
+            'version' => is_string($version) && $version !== '' ? $version : null,
             'rules' => $decoded['rules'],
         ];
     }
@@ -105,7 +111,7 @@ class PolicyStore
      *
      * @param array<int, array<int, string>> $rules
      */
-    public function writeSnapshot(array $rules): void
+    public function writeSnapshot(array $rules, ?string $version = null): void
     {
         $directory = dirname($this->snapshotPath);
 
@@ -113,10 +119,15 @@ class PolicyStore
             throw new RuntimeException(sprintf('Unable to create snapshot directory "%s".', $directory));
         }
 
-        $payload = json_encode([
-            'loaded_at' => Carbon::now()->getTimestamp(),
-            'rules' => array_values($rules),
-        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+        $data = ['loaded_at' => Carbon::now()->getTimestamp()];
+
+        if ($version !== null) {
+            $data['version'] = $version;
+        }
+
+        $data['rules'] = array_values($rules);
+
+        $payload = json_encode($data, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
 
         $temp = $this->snapshotPath.'.'.uniqid('tmp', true);
 
@@ -132,9 +143,10 @@ class PolicyStore
     }
 
     /**
-     * Refresh the snapshot from the database when it is missing or older than
-     * refresh_seconds. On database failure the existing snapshot is kept
-     * indefinitely; without any snapshot, PolicyUnavailableException is thrown.
+     * Refresh the snapshot from the configured source when it is missing or
+     * older than refresh_seconds. On source failure the existing snapshot is
+     * kept indefinitely; without any snapshot, PolicyUnavailableException is
+     * thrown.
      */
     public function refreshIfStale(): void
     {
@@ -157,13 +169,13 @@ class PolicyStore
         }
 
         try {
-            $this->writeSnapshot($this->load());
+            $this->refreshFromSource($snapshot);
         } catch (Throwable $e) {
             $this->warnThrottled($e);
 
             if ($snapshot === null) {
                 throw new PolicyUnavailableException(
-                    'Casbin policy unavailable: no local snapshot and the database load failed.',
+                    sprintf('Casbin policy unavailable: no local snapshot and the %s load failed.', $this->source),
                     0,
                     $e,
                 );
@@ -173,6 +185,48 @@ class PolicyStore
                 $lock->release();
             }
         }
+    }
+
+    /**
+     * Force a refresh from the configured source regardless of snapshot age.
+     * Throws on failure; returns the number of rules in the fresh snapshot.
+     */
+    public function refreshNow(): int
+    {
+        $this->refreshFromSource($this->snapshot());
+
+        $fresh = $this->snapshot();
+
+        return $fresh === null ? 0 : count($fresh['rules']);
+    }
+
+    /**
+     * Refresh the snapshot once from the configured source.
+     *
+     * @param array{loaded_at: int, version: string|null, rules: array<int, array<int, string>>}|null $snapshot
+     */
+    private function refreshFromSource(?array $snapshot): void
+    {
+        if ($this->source === 'http') {
+            if ($this->httpSource === null) {
+                throw new RuntimeException('casbin-authz: source is "http" but no HTTP source is configured.');
+            }
+
+            $result = $this->httpSource->fetch($snapshot['version'] ?? null);
+
+            if ($result['not_modified']) {
+                // 304: rules are unchanged; bump loaded_at so the refresh counts.
+                $this->writeSnapshot($snapshot['rules'] ?? [], $result['version']);
+
+                return;
+            }
+
+            $this->writeSnapshot($result['rules'] ?? [], $result['version']);
+
+            return;
+        }
+
+        $this->writeSnapshot($this->load());
     }
 
     /**
@@ -192,7 +246,8 @@ class PolicyStore
     private function warnThrottled(Throwable $e): void
     {
         if (Cache::add(self::WARNING_THROTTLE_KEY, 1, self::WARNING_THROTTLE_SECONDS)) {
-            Log::warning('casbin-authz: policy refresh from database failed; keeping existing snapshot.', [
+            Log::warning(sprintf('casbin-authz: policy refresh from %s failed; keeping existing snapshot.', $this->source), [
+                'source' => $this->source,
                 'connection' => $this->connection,
                 'error' => $e->getMessage(),
             ]);

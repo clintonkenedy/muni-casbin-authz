@@ -9,6 +9,13 @@ shared `casbin_rule` table. The **control plane** (policy administration, the
 package only *reads* policies and evaluates them in-process, so authorization
 keeps working even when the Casbin service or its database is down.
 
+Two policy **sources** are supported (config `source`, env `CASBIN_SOURCE`):
+
+- `database` (default) — read the shared `casbin_rule` table directly.
+- `http` — pull the policy snapshot from the control plane over HTTPS
+  (`GET /policies/snapshot`), for systems deployed elsewhere that cannot
+  reach the Casbin Postgres.
+
 ## How it works
 
 PHP-FPM has no long-lived process, so instead of an in-memory enforcer with a
@@ -64,8 +71,46 @@ database.
 | `table`              | —                       | `casbin_rule`                         | Policy table (xorm schema: `p_type, v0..v5`)       |
 | `model_path`         | —                       | bundled `config/model.conf`           | Casbin model (identical to the control plane)      |
 | `snapshot_path`      | —                       | `storage/app/casbin/policy.json`      | Local policy snapshot                              |
-| `refresh_seconds`    | `CASBIN_REFRESH_SECONDS`| `30`                                  | Snapshot max age before a DB reload is attempted   |
+| `refresh_seconds`    | `CASBIN_REFRESH_SECONDS`| `30`                                  | Snapshot max age before a reload is attempted      |
 | `db_timeout_seconds` | —                       | `2`                                   | Statement timeout for the policy read (pgsql)      |
+| `source`             | `CASBIN_SOURCE`         | `database`                            | Policy source: `database` or `http`                |
+| `http.snapshot_url`  | `CASBIN_SNAPSHOT_URL`   | —                                     | Full URL of the control plane `/policies/snapshot` |
+| `http.token_url`     | `CASBIN_TOKEN_URL`      | —                                     | Hydra `/oauth2/token` endpoint                     |
+| `http.client_id`     | `CASBIN_CLIENT_ID`      | —                                     | Hydra client id (client_credentials)               |
+| `http.client_secret` | `CASBIN_CLIENT_SECRET`  | —                                     | Hydra client secret (client_secret_post)           |
+| `http.scope`         | —                       | `authz.read`                          | OAuth2 scope required by the snapshot endpoint     |
+| `http.timeout_seconds` | `CASBIN_HTTP_TIMEOUT_SECONDS` | `2`                           | Timeout for token and snapshot requests            |
+
+## HTTP snapshot source
+
+When `CASBIN_SOURCE=http`, the package never touches the database. Instead it
+refreshes the local snapshot from the control plane endpoint
+`GET /policies/snapshot`, which returns
+`{"version": "<sha256>", "rules": [[ptype, v0, ...], ...]}` with an
+`ETag: "<version>"` header:
+
+- Authentication: Hydra **client_credentials** (`client_secret_post`) with
+  scope **`authz.read`**. **Each external system needs its own Hydra client**
+  with that scope. The access token is cached until 30 s before `expires_in`;
+  on a `401` from the snapshot URL a new token is fetched and the request is
+  retried once.
+- Conditional refresh: the stored snapshot `version` is sent as
+  `If-None-Match`; a `304` keeps the rules and bumps `loaded_at` (it counts as
+  a successful refresh).
+- Resilience is identical to the database source: any failure (network,
+  timeout, 5xx, malformed body, token error) keeps the last snapshot
+  **indefinitely** and logs a throttled warning; with no snapshot at all,
+  `PolicyUnavailableException` is thrown (map to `503`).
+- The rules feed the exact same enforcer path as the database source, so
+  authorization decisions are identical for the same policy.
+
+```dotenv
+CASBIN_SOURCE=http
+CASBIN_SNAPSHOT_URL=https://casbin.example.gob.pe/policies/snapshot
+CASBIN_TOKEN_URL=https://hydra.example.gob.pe/oauth2/token
+CASBIN_CLIENT_ID=back-remote
+CASBIN_CLIENT_SECRET=********
+```
 
 ## Usage in a middleware
 
@@ -115,13 +160,15 @@ memoized per request.
 
 ## Resilience semantics
 
-- Policy snapshot refreshed from the DB at most every `refresh_seconds`.
-- On DB failure the stale snapshot is kept **indefinitely** (fail-stale);
-  a warning is logged at most once per 60 s.
+- Policy snapshot refreshed from the configured source at most every
+  `refresh_seconds`.
+- On source failure (DB or HTTP) the stale snapshot is kept **indefinitely**
+  (fail-stale); a warning is logged at most once per 60 s.
 - Without any snapshot, enforcement **fails closed** with
   `PolicyUnavailableException` → respond `503`.
-- `casbin-authz:refresh` forces an immediate reload (non-zero exit on DB
-  failure) — useful after policy changes or to pre-warm the snapshot:
+- `casbin-authz:refresh` forces an immediate reload from the configured source
+  (non-zero exit on failure) — useful after policy changes or to pre-warm the
+  snapshot:
 
 ```bash
 php artisan casbin-authz:refresh

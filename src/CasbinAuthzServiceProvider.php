@@ -16,6 +16,22 @@ class CasbinAuthzServiceProvider extends ServiceProvider
 
         $this->app->singleton(PolicyStore::class, function (Application $app): PolicyStore {
             $config = $app['config']['casbin-authz'];
+            $source = (string) ($config['source'] ?? 'database');
+
+            $httpSource = null;
+
+            if ($source === 'http') {
+                $http = $config['http'] ?? [];
+
+                $httpSource = new HttpPolicySource(
+                    snapshotUrl: (string) ($http['snapshot_url'] ?? ''),
+                    tokenUrl: (string) ($http['token_url'] ?? ''),
+                    clientId: (string) ($http['client_id'] ?? ''),
+                    clientSecret: (string) ($http['client_secret'] ?? ''),
+                    scope: (string) ($http['scope'] ?? 'authz.read'),
+                    timeoutSeconds: (int) ($http['timeout_seconds'] ?? 2),
+                );
+            }
 
             return new PolicyStore(
                 connection: (string) $config['connection'],
@@ -23,6 +39,8 @@ class CasbinAuthzServiceProvider extends ServiceProvider
                 snapshotPath: (string) $config['snapshot_path'],
                 refreshSeconds: (int) $config['refresh_seconds'],
                 dbTimeoutSeconds: (int) $config['db_timeout_seconds'],
+                source: $source,
+                httpSource: $httpSource,
             );
         });
 
